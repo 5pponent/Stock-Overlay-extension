@@ -1,0 +1,41 @@
+<!doctype html>
+<html lang="ko">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Naver Stock Overlay</title>
+    <link rel="stylesheet" href="popup.css">
+  </head>
+  <body>
+    <main class="popup">
+      <header class="header">
+        <p class="eyebrow">Naver Store</p>
+        <h1>Stock Overlay</h1>
+      </header>
+
+      <section class="tab-card" aria-label="Current tab">
+        <span class="label">현재 탭</span>
+        <p id="tab-title" class="tab-title">불러오는 중...</p>
+      </section>
+
+      <section class="stats" aria-label="Overlay status">
+        <div class="stat">
+          <span class="label">감지 상품</span>
+          <strong id="product-count">-</strong>
+        </div>
+        <div class="stat">
+          <span class="label">표시 배지</span>
+          <strong id="badge-count">-</strong>
+        </div>
+      </section>
+
+      <button id="toggle-button" class="primary-button" type="button">
+        오버레이 끄기
+      </button>
+
+      <p id="status" class="status" role="status" aria-live="polite"></p>
+    </main>
+
+    <script src="popup.js"></script>
+  </body>
+</html>
