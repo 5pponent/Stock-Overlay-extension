@@ -10,6 +10,7 @@
     'a[href*="/products/"], a[href*="productNo="], a[href*="channelProductNo="]';
 
   const PRODUCT_ID_KEYS = [
+    "channelProductId",
     "channelProductNo",
     "productNo",
     "originProductNo",
@@ -714,8 +715,50 @@
     return "";
   }
 
+  function countDistinctProducts(root) {
+    const ids = new Set();
+
+    for (const anchor of root.querySelectorAll(PRODUCT_LINK_SELECTOR)) {
+      const id = getProductIdFromUrl(anchor.getAttribute("href"));
+
+      if (id) {
+        ids.add(id);
+      }
+    }
+
+    return ids.size;
+  }
+
   function findProductImage(link) {
-    return link.querySelector("img");
+    // Smartstore/brand PLP cards nest the <img> inside the product link.
+    const inside = link.querySelector("img");
+
+    if (inside) {
+      return inside;
+    }
+
+    // Naver Shopping search cards put the product link and its thumbnail <img>
+    // as siblings inside a shared card wrapper, so the image is not a descendant
+    // of the link. Climb toward the card wrapper and take its image, but stop
+    // before an ancestor spans more than one product (that would be a container
+    // shared by several cards, where the image would be ambiguous).
+    let node = link.parentElement;
+
+    for (let depth = 0; node && depth < 6; depth += 1) {
+      if (countDistinctProducts(node) > 1) {
+        break;
+      }
+
+      const image = node.querySelector("img");
+
+      if (image) {
+        return image;
+      }
+
+      node = node.parentElement;
+    }
+
+    return null;
   }
 
   function isInactiveSwiperSlide(link) {
@@ -894,8 +937,8 @@
           : typeof product.dispSalePrice === "number"
           ? product.dispSalePrice
           : null;
-      const discounted = product.benefitsView?.discountedSalePrice;
-      const discountedRatio = product.benefitsView?.discountedRatio;
+      const discounted = product.benefitsView?.discountedSalePrice ?? product.discountedSalePrice;
+      const discountedRatio = product.benefitsView?.discountedRatio ?? product.discountedRatio;
 
       if (typeof discounted === "number" && salePrice !== null && discounted < salePrice) {
         const ratioText = discountedRatio ? ` (${discountedRatio}%↓)` : "";
@@ -921,7 +964,7 @@
         facts.push({ label: "리뷰적립", value: `최대 ${formatPrice(reviewReward)}` });
       }
 
-      const review = product.reviewAmount;
+      const review = product.reviewAmount || product;
 
       if (review && (review.totalReviewCount || review.averageReviewScore)) {
         const score = review.averageReviewScore ? `★ ${review.averageReviewScore}` : "리뷰";
@@ -952,7 +995,7 @@
         facts.push({ label: "브랜드", value: [brand, maker].filter(Boolean).join(" / ") });
       }
 
-      const store = product.channel?.channelName;
+      const store = product.channel?.channelName || product.mallName;
 
       if (store) {
         facts.push({ label: "스토어", value: store });
@@ -1012,7 +1055,10 @@
     head.className = "cnt-pop-head";
 
     const imageUrl =
-      product?.representativeImageUrl || product?.imageUrl || product?.mobileImageUrl;
+      product?.representativeImageUrl ||
+      product?.imageUrl ||
+      product?.mobileImageUrl ||
+      product?.images?.[0]?.imageUrl;
 
     if (imageUrl) {
       const thumb = document.createElement("img");
@@ -1270,6 +1316,54 @@
     return "";
   }
 
+  // Naver's __PRELOADED_STATE__ is a JS object literal, not strict JSON: it can
+  // contain bare `undefined`/`NaN`/`Infinity` values that JSON.parse rejects.
+  // Replace those tokens (only when outside string literals) with null so the
+  // whole payload still parses instead of being discarded.
+  const NON_JSON_LITERALS = ["-Infinity", "undefined", "Infinity", "NaN"];
+
+  function sanitizeJsonLiteral(text) {
+    let result = "";
+    let inString = false;
+    let escaped = false;
+
+    for (let index = 0; index < text.length; index += 1) {
+      const char = text[index];
+
+      if (inString) {
+        result += char;
+
+        if (escaped) {
+          escaped = false;
+        } else if (char === "\\") {
+          escaped = true;
+        } else if (char === "\"") {
+          inString = false;
+        }
+
+        continue;
+      }
+
+      if (char === "\"") {
+        inString = true;
+        result += char;
+        continue;
+      }
+
+      const literal = NON_JSON_LITERALS.find((candidate) => text.startsWith(candidate, index));
+
+      if (literal) {
+        result += "null";
+        index += literal.length - 1;
+        continue;
+      }
+
+      result += char;
+    }
+
+    return result;
+  }
+
   function mergeRecords(records, sourceUrl) {
     let changed = false;
 
@@ -1314,10 +1408,96 @@
 
       try {
         changed =
-          mergeRecords(extractStockRecords(JSON.parse(jsonText)), "inline __PRELOADED_STATE__") ||
+          mergeRecords(
+            extractStockRecords(JSON.parse(sanitizeJsonLiteral(jsonText))),
+            "inline __PRELOADED_STATE__"
+          ) ||
           changed;
       } catch (error) {
         // Ignore inline scripts that mention the marker but do not contain JSON state.
+      }
+    }
+
+    if (changed) {
+      scheduleRender();
+    }
+  }
+
+  // Naver Shopping search (search.shopping.naver.com/ns/*) is a Next.js App
+  // Router page. Its product list is streamed as React Server Component "flight"
+  // data via many `self.__next_f.push([n, "<escaped chunk>"])` calls instead of a
+  // single __PRELOADED_STATE__ assignment. Concatenating every pushed chunk
+  // yields a stream of newline-separated `<hexId>:<json>` rows; the product cards
+  // (channelProductId + stockQuantity) live inside one of those JSON rows.
+  const NEXT_FLIGHT_PUSH = /self\.__next_f\.push\(\[\d+,"((?:[^"\\]|\\.)*)"\]\)/g;
+  const FLIGHT_ROW_RELEVANT = /stock|inventory|remain|available|soldOut|channelProductId|productNo/i;
+  const seenFlightRowTexts = new Set();
+
+  function reconstructNextFlight() {
+    const chunks = [];
+
+    for (const script of document.scripts) {
+      const text = script.textContent || "";
+
+      if (!text.includes("__next_f")) {
+        continue;
+      }
+
+      NEXT_FLIGHT_PUSH.lastIndex = 0;
+      let match;
+
+      while ((match = NEXT_FLIGHT_PUSH.exec(text)) !== null) {
+        try {
+          // The captured group is a JS string literal body; decode its escapes.
+          chunks.push(JSON.parse(`"${match[1]}"`));
+        } catch (error) {
+          // Skip chunks whose escaped body is not a valid string literal.
+        }
+      }
+    }
+
+    return chunks.join("");
+  }
+
+  function readNextFlightState() {
+    const flight = reconstructNextFlight();
+
+    if (!flight) {
+      return;
+    }
+
+    let changed = false;
+
+    for (const row of flight.split("\n")) {
+      const colonIndex = row.indexOf(":");
+
+      if (colonIndex === -1) {
+        continue;
+      }
+
+      const payload = row.slice(colonIndex + 1);
+      const firstChar = payload[0];
+
+      if (firstChar !== "{" && firstChar !== "[") {
+        continue;
+      }
+
+      if (!FLIGHT_ROW_RELEVANT.test(payload) || seenFlightRowTexts.has(payload)) {
+        continue;
+      }
+
+      seenFlightRowTexts.add(payload);
+
+      try {
+        changed =
+          mergeRecords(
+            extractStockRecords(JSON.parse(sanitizeJsonLiteral(payload))),
+            "inline __next_f"
+          ) || changed;
+      } catch (error) {
+        // A row can be incomplete while the flight is still streaming; drop it
+        // from the seen set so a later read retries once more chunks arrive.
+        seenFlightRowTexts.delete(payload);
       }
     }
 
@@ -1334,8 +1514,54 @@
     inlineStateTimer = window.setTimeout(() => {
       inlineStateTimer = null;
       readInlineProductState();
+      readNextFlightState();
     }, 80);
   }
+
+  // SPA navigations fetch product/stock data over the network instead of
+  // re-embedding it as an inline __PRELOADED_STATE__ script. inject.js (MAIN
+  // world) forwards those JSON bodies here so they feed the same pipeline.
+  const seenNetworkPayloads = new Set();
+
+  function readNetworkPayload(text) {
+    if (typeof text !== "string" || !text || seenNetworkPayloads.has(text)) {
+      return;
+    }
+
+    seenNetworkPayloads.add(text);
+
+    // Bound memory across a long SPA session.
+    if (seenNetworkPayloads.size > 60) {
+      seenNetworkPayloads.clear();
+      seenNetworkPayloads.add(text);
+    }
+
+    let parsed;
+
+    try {
+      parsed = JSON.parse(sanitizeJsonLiteral(text));
+    } catch (error) {
+      return;
+    }
+
+    if (mergeRecords(extractStockRecords(parsed), "network")) {
+      scheduleRender();
+    }
+  }
+
+  window.addEventListener("message", (event) => {
+    if (event.source !== window) {
+      return;
+    }
+
+    const data = event.data;
+
+    if (!data || data.source !== "cnt-stock-net" || typeof data.payload !== "string") {
+      return;
+    }
+
+    readNetworkPayload(data.payload);
+  });
 
   function observeDomChanges() {
     const target = document.documentElement;

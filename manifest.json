@@ -2,7 +2,7 @@
   "manifest_version": 3,
   "name": "Naver Store Stock Overlay",
   "description": "Shows detected stock quantity badges on Naver Store PLP product images.",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "icons": {
     "128": "icons/icon-128.png"
   },
@@ -19,9 +19,26 @@
   "permissions": ["activeTab", "storage"],
   "content_scripts": [
     {
-      "matches": ["https://smartstore.naver.com/*", "https://brand.naver.com/*"],
+      "matches": [
+        "https://smartstore.naver.com/*",
+        "https://brand.naver.com/*",
+        "https://search.shopping.naver.com/*",
+        "https://shopping.naver.com/*"
+      ],
+      "js": ["inject.js"],
+      "run_at": "document_start",
+      "world": "MAIN"
+    },
+    {
+      "matches": [
+        "https://smartstore.naver.com/*",
+        "https://brand.naver.com/*",
+        "https://search.shopping.naver.com/*",
+        "https://shopping.naver.com/*"
+      ],
       "js": ["content.js"],
-      "run_at": "document_start"
+      "run_at": "document_start",
+      "world": "ISOLATED"
     }
   ]
 }
